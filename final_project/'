@@ -1,0 +1,132 @@
+# using a csv file to convet states to regions for furhter analysis
+import pandas as pd
+import requests
+from functools import reduce
+import seaborn as sns
+import matplotlib as plt
+
+params = {"format": "json"}
+
+df = pd.DataFrame(
+    requests.get("https://waterwatch.usgs.gov/webservices/realtime",
+                 params=params).json()["sites"])
+
+df["site_no"] = df["site_no"].astype("int")
+
+county_lookup = pd.read_csv("county_lookup.csv").dropna()
+
+county_lookup["county_fips"] = county_lookup["county_fips"].astype(
+    "int").astype("str")
+
+prepend_zero = lambda s: "0" + s if len(s) == 4 else s
+county_lookup["county_fips"] = county_lookup["county_fips"].apply(prepend_zero)
+
+plot_df = pd.merge(county_lookup, df, on="site_no")
+
+plot_df = plot_df[plot_df["percentile"] != 0].dropna()
+plot_df = plot_df.rename(columns={'percentile': "realtime"})
+
+df_list = []
+
+for n in ["7", "14", "28"]:
+    df = pd.DataFrame(
+        requests.get(f"https://waterwatch.usgs.gov/webservices/flows{n}d",
+                     params=params).json()["sites"]).dropna()
+    df = df[df["percentile"] != 0]
+    df["site_no"] = df["site_no"].astype("int")
+    df = df[["site_no", "percentile"]]
+    df = df.rename(columns={'percentile': f'{n}'})
+    df_list.append(df)
+
+df_list.append(plot_df)
+
+plot_df = reduce(lambda left, right: left.merge(right, on='site_no'), df_list)
+
+state_data = plot_df.groupby(["state_nm", "state_code"
+                              ])[["realtime", "7", "14",
+                                  "28"]].median().round(2).reset_index()
+
+county_data = plot_df.groupby([
+    "state_nm", "county_nm", "county_fips", "state_code"
+])[["realtime", "7", "14", "28"]].median().round(2).reset_index()
+
+region = pd.read_csv(
+    'https://raw.githubusercontent.com/cphalpert/census-regions/master/us%20census%20bureau%20regions%20and%20divisions.csv'
+)
+del region["Division"]
+del region["State"]
+region.columns = ['state_code', 'region']
+mer_res = pd.merge(state_data, region, on='state_code')
+
+# Creating horizontal bar graph of top 20 states
+top20_states = state_data.sort_values(by="realtime", ascending=False)[1:20]
+
+
+def hor_barplot(data):
+    ax = sns.barplot(y='state_nm', x='realtime', data=data, color='blue')
+    #plt.title('Top 20 States with highest streamflows', fontsize=15)
+    #plt.xlabel('Percentile of streamflows in each state', fontsize=12)
+    plt.xticks(fontsize=10)
+    #plt.ylabel(None)
+    plt.yticks(fontsize=10)
+    sns.despine(left=True)
+    ax.grid(False)
+    ax.tick_params(bottom=True, left=False)
+    return None
+
+
+hor_barplot(top20_states)
+plt.show()
+
+# creating boxplot to compare percentile by regions
+bplot = sns.boxplot(y='realtime',
+                    x='region',
+                    data=mer_res,
+                    width=0.5,
+                    palette="colorblind")
+# bplot=sns.stripplot(y='percentile', x='region',
+#                    data=mer_res,
+#                    jitter=True,
+#                    marker='o',
+#                    alpha=0.5,
+#                    color='black')
+bplot = sns.swarmplot(y='realtime',
+                      x='region',
+                      data=mer_res,
+                      color='black',
+                      alpha=0.75)
+
+# narrowing down to canlifornia counties
+cal_county = county_data[(county_data["state_nm"] == "California")]
+cal_county['county_nm'] = cal_county["county_nm"].str.replace(" County", "")
+cal_county
+
+top10_county = cal_county.sort_values(by="realtime", ascending=False)[:10]
+top10_county
+
+last10_county = cal_county.sort_values(by="realtime", ascending=True)[:10]
+last10_county
+
+# creating comparison plots for for the highest and lowest counties
+fig, ax = plt.subplots(figsize=(70, 50))
+fig.tight_layout(pad=20)
+
+
+def hor_barplot2(subplot, data):
+    plt.subplot(1, 2, subplot)
+    ax = sns.barplot(y='county_nm', x='realtime', data=data, color='maroon')
+    fig.suptitle('Highest vs Lowest Streamflows for California Counties',
+                 fontsize=100)
+    plt.xlabel('Percentile of streamflows in each County', fontsize=80)
+    plt.xticks(fontsize=80)
+    plt.ylabel(None)
+    plt.yticks(fontsize=50)
+    sns.despine(left=True)
+    ax.grid(False)
+    ax.tick_params(bottom=True, left=False)
+    return None
+
+
+hor_barplot2(1, top10_county)
+hor_barplot2(2, last10_county)
+plt.show()
